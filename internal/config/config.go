@@ -48,11 +48,32 @@ const (
 //       name: tf2
 //     - namespace: infra
 //       name: tfcore
+//       # Optional doublestar globs OR'd with spec.path when filtering PRs
+//       # under enablePathScope. Applies to every Terraform matched by this
+//       # entry; for wildcard-namespace entries (no name), applies to every
+//       # Terraform in the namespace.
+//       additionalPaths:
+//         - infra/tenant-infrastructure-configs.yaml
+//         - infra/terraform/modules/**
 //     - namespace: team-a
 //       name: helloworld-tf
 
+// Resource describes one branch-planner ConfigMap entry: either a specific
+// Terraform (Namespace + Name) or a wildcard over a namespace (Name == "").
+// AdditionalPaths is an optional list of doublestar globs that the PR-path
+// filter ORs with spec.path when enablePathScope is true.
+type Resource struct {
+	Namespace       string   `yaml:"namespace"`
+	Name            string   `yaml:"name"`
+	AdditionalPaths []string `yaml:"additionalPaths,omitempty"`
+}
+
+func (r Resource) ObjectKey() client.ObjectKey {
+	return client.ObjectKey{Namespace: r.Namespace, Name: r.Name}
+}
+
 type Config struct {
-	Resources       []client.ObjectKey
+	Resources       []Resource
 	SecretNamespace string
 	SecretName      string
 	Labels          map[string]string
@@ -68,7 +89,7 @@ func ReadConfig(ctx context.Context, clusterClient client.Client, configMapObjec
 		defaultConfig := Config{
 			SecretName:      DefaultTokenSecretName,
 			SecretNamespace: RuntimeNamespace(),
-			Resources: []client.ObjectKey{
+			Resources: []Resource{
 				{Namespace: RuntimeNamespace()},
 			},
 		}

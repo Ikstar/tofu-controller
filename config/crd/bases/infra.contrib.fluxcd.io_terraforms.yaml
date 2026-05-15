@@ -5633,6 +5633,18 @@ spec:
               branchPlanner:
                 description: BranchPlanner configuration.
                 properties:
+                  additionalPaths:
+                    description: |-
+                      AdditionalPaths is an optional list of doublestar glob patterns (e.g.
+                      "infra/terraform/modules/**") that the Branch Planner ORs with
+                      `.spec.path` when filtering pull requests under EnablePathScope. A PR is
+                      included when any changed file matches the spec.path prefix OR any of
+                      these globs. Patterns are matched against file paths as returned by the
+                      git provider, without a leading "./". Ignored when EnablePathScope is
+                      false.
+                    items:
+                      type: string
+                    type: array
                   enablePathScope:
                     description: |-
                       EnablePathScope specifies if the Branch Planner should or shouldn't check
