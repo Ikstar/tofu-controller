@@ -291,6 +291,52 @@ data:
     - namespace: terraform
 ```
 
+#### Filtering pull requests by path
+
+When a `Terraform` object sets `spec.branchPlanner.enablePathScope: true`, the
+Branch Planner only acts on a pull request if at least one changed file matches
+**any** of:
+
+1. The `spec.path` prefix (`strings.HasPrefix` match — unchanged behavior).
+2. The `additionalPaths` list on the matching `resources:` entry in the
+   ConfigMap. For wildcard-namespace entries (no `name:`), this list applies
+   to every Terraform in the namespace.
+3. The per-object `spec.branchPlanner.additionalPaths` on the `Terraform` CR.
+
+Entries in either `additionalPaths` list are evaluated as
+[doublestar](https://github.com/bmatcuk/doublestar) globs (`**`, `*`, `?`,
+character classes). Patterns are matched against PR file paths as returned by
+the git provider — no leading `./`. Invalid patterns are logged and skipped, so
+a single bad glob does not disable the planner. Both lists are ignored when
+`enablePathScope: false`.
+
+ConfigMap with namespace-wide globs:
+
+```yaml
+data:
+  resources:
+    - namespace: flux-system
+      additionalPaths:
+        - infra/tenant-infrastructure-configs.yaml
+        - infra/terraform/modules/**
+```
+
+Terraform CR with per-object globs:
+
+```yaml
+apiVersion: infra.contrib.fluxcd.io/v1alpha2
+kind: Terraform
+metadata:
+  name: open-tofu-tenant-a
+  namespace: flux-system
+spec:
+  path: ./infra/terraform/environments/tenant-a
+  branchPlanner:
+    enablePathScope: true
+    additionalPaths:
+      - infra/tenant-a/**
+```
+
 ### Default Configuration
 
 If no ConfigMap is found, the Branch Planner will not watch any namespaces for Terraform resources and look for a token in a secret named `branch-planner-token` in the `flux-system` namespace. Supplying a secret with a token is a necessary task, otherwise Branch Planner will not be able to interact with the Git provider API.

@@ -67,7 +67,7 @@ func Test_poll_empty(t *testing.T) {
 	// Now we'll run `reconcile` to step the server once, and afterwards,
 	// we should be able to see what it did.
 	ctx := t.Context()
-	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, &providerfakes.FakeProvider{}))
+	expectToSucceed(t, g, server.reconcile(ctx, original, nil, source, prs, &providerfakes.FakeProvider{}))
 
 	// We expect it to have done nothing! So, check it didn't create
 	// any more Terraform or source objects.
@@ -173,7 +173,7 @@ func Test_poll_reconcile_objects(t *testing.T) {
 	// Now we'll run `reconcile` to step the server once, and afterwards,
 	// we should be able to see what it did.
 	ctx := t.Context()
-	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, &providerfakes.FakeProvider{}))
+	expectToSucceed(t, g, server.reconcile(ctx, original, nil, source, prs, &providerfakes.FakeProvider{}))
 
 	// We expect the branch TF objects and corresponding sources
 	// to be created for each PR
@@ -233,7 +233,7 @@ func Test_poll_reconcile_objects(t *testing.T) {
 	original.Spec.WriteOutputsToSecret.Name = secretName
 
 	expectToSucceed(t, g, k8sClient.Update(t.Context(), original))
-	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, &providerfakes.FakeProvider{}))
+	expectToSucceed(t, g, server.reconcile(ctx, original, nil, source, prs, &providerfakes.FakeProvider{}))
 
 	tfList.Items = nil
 
@@ -252,7 +252,7 @@ func Test_poll_reconcile_objects(t *testing.T) {
 	// and the original Terraform object and source are retained.
 	prs = prs[2:]
 
-	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, &providerfakes.FakeProvider{}))
+	expectToSucceed(t, g, server.reconcile(ctx, original, nil, source, prs, &providerfakes.FakeProvider{}))
 
 	tfList.Items = nil
 
@@ -358,7 +358,7 @@ func Test_poll_noPathChanges(t *testing.T) {
 	// Now we'll run `reconcile` to step the server once, and afterwards,
 	// we should be able to see what it did.
 	ctx := t.Context()
-	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, gitProvider))
+	expectToSucceed(t, g, server.reconcile(ctx, original, nil, source, prs, gitProvider))
 
 	// We expect it to have done nothing! So, check it didn't create
 	// any more Terraform or source objects.
@@ -378,4 +378,139 @@ func Test_poll_noPathChanges(t *testing.T) {
 	expectToEqual(t, g, srcList.Items[0].Name, source.Name)
 
 	t.Cleanup(func() { expectToSucceed(t, g, k8sClient.Delete(context.Background(), ns)) })
+}
+
+// Test_filterPullRequestsByPath exercises the path-scope filter directly with
+// a fake git provider, so we can fan out cases over the three OR'd sources
+// (spec.path prefix, ConfigMap-level additionalPaths, CR-level additionalPaths)
+// without spinning up full reconcile() machinery.
+func Test_filterPullRequestsByPath(t *testing.T) {
+	cases := []struct {
+		name            string
+		enablePathScope bool
+		specPath        string
+		configMapGlobs  []string
+		crGlobs         []string
+		changedFiles    []string
+		wantPRIncluded  bool
+	}{
+		{
+			name:            "path-scope disabled bypasses filter",
+			enablePathScope: false,
+			specPath:        "infra/terraform/environments/global",
+			changedFiles:    []string{"README.md"},
+			wantPRIncluded:  true,
+		},
+		{
+			name:            "spec.path prefix matches (unchanged behavior)",
+			enablePathScope: true,
+			specPath:        "./infra/terraform/environments/global",
+			changedFiles:    []string{"infra/terraform/environments/global/main.tf"},
+			wantPRIncluded:  true,
+		},
+		{
+			name:            "spec.path prefix doesn't match",
+			enablePathScope: true,
+			specPath:        "./infra/terraform/environments/global",
+			changedFiles:    []string{"README.md"},
+			wantPRIncluded:  false,
+		},
+		{
+			name:            "ConfigMap glob matches a literal path",
+			enablePathScope: true,
+			specPath:        "infra/terraform/environments/global",
+			configMapGlobs:  []string{"infra/tenant-infrastructure-configs.yaml"},
+			changedFiles:    []string{"infra/tenant-infrastructure-configs.yaml"},
+			wantPRIncluded:  true,
+		},
+		{
+			name:            "ConfigMap doublestar glob matches recursively",
+			enablePathScope: true,
+			specPath:        "infra/terraform/environments/global",
+			configMapGlobs:  []string{"infra/terraform/modules/**"},
+			changedFiles:    []string{"infra/terraform/modules/networking/main.tf"},
+			wantPRIncluded:  true,
+		},
+		{
+			name:            "CR-level glob matches (independent of ConfigMap)",
+			enablePathScope: true,
+			specPath:        "infra/terraform/environments/global",
+			crGlobs:         []string{"infra/global/*.yaml"},
+			changedFiles:    []string{"infra/global/tenants.yaml"},
+			wantPRIncluded:  true,
+		},
+		{
+			name:            "empty spec.path + ConfigMap glob still filters",
+			enablePathScope: true,
+			specPath:        "",
+			configMapGlobs:  []string{"infra/**"},
+			changedFiles:    []string{"docs/README.md"},
+			wantPRIncluded:  false,
+		},
+		{
+			name:            "empty spec.path + matching ConfigMap glob",
+			enablePathScope: true,
+			specPath:        "",
+			configMapGlobs:  []string{"infra/**"},
+			changedFiles:    []string{"infra/anything.txt"},
+			wantPRIncluded:  true,
+		},
+		{
+			name:            "invalid glob logged, valid glob still matches",
+			enablePathScope: true,
+			specPath:        "infra/terraform/environments/global",
+			configMapGlobs:  []string{"[bad-bracket", "infra/terraform/modules/**"},
+			changedFiles:    []string{"infra/terraform/modules/networking/main.tf"},
+			wantPRIncluded:  true,
+		},
+		{
+			name:            "no matches across any source",
+			enablePathScope: true,
+			specPath:        "infra/terraform/environments/global",
+			configMapGlobs:  []string{"infra/terraform/modules/**"},
+			crGlobs:         []string{"docs/*.md"},
+			changedFiles:    []string{"unrelated/file.txt"},
+			wantPRIncluded:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+
+			tf := &infrav1.Terraform{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "tf-under-test",
+					Namespace: "test-ns",
+				},
+				Spec: infrav1.TerraformSpec{
+					Path: tc.specPath,
+					BranchPlanner: &infrav1.BranchPlanner{
+						EnablePathScope: tc.enablePathScope,
+						AdditionalPaths: tc.crGlobs,
+					},
+				},
+			}
+
+			changes := make([]provider.Change, 0, len(tc.changedFiles))
+			for _, p := range tc.changedFiles {
+				changes = append(changes, provider.Change{Path: p, Added: true})
+			}
+			fakeProvider := &providerfakes.FakeProvider{}
+			fakeProvider.ListPullRequestChangesReturns(changes, nil)
+
+			prs := []provider.PullRequest{{Number: 42, BaseBranch: "main", HeadBranch: "feature"}}
+
+			server, err := New(WithClusterClient(k8sClient))
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			out := server.filterPullRequestsByPath(t.Context(), tf, tc.configMapGlobs, fakeProvider, prs)
+			if tc.wantPRIncluded {
+				g.Expect(out).To(gomega.HaveLen(1), "PR should pass the filter")
+			} else {
+				g.Expect(out).To(gomega.HaveLen(0), "PR should be filtered out")
+			}
+		})
+	}
 }

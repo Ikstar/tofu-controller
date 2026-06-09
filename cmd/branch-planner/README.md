@@ -87,6 +87,60 @@ data:
 EOF
 ```
 
+### Filtering pull requests by path
+
+When a `Terraform` object sets `spec.branchPlanner.enablePathScope: true`, the
+branch planner only acts on a pull request if at least one changed file matches
+**any** of:
+
+1. The `spec.path` prefix (literal `strings.HasPrefix` match — unchanged
+   behavior).
+2. An optional `additionalPaths` list on the matching `resources:` entry in
+   the ConfigMap (applies to every Terraform that entry matches — including
+   every Terraform in a wildcard-namespace entry).
+3. An optional `spec.branchPlanner.additionalPaths` on the `Terraform` object
+   itself (scoped to that one resource).
+
+Entries in either `additionalPaths` list are evaluated as
+[doublestar](https://github.com/bmatcuk/doublestar) globs — `**`, `*`, `?`, and
+character classes are supported. Patterns are matched against PR file paths as
+returned by the git provider (no leading `./`), and entries can be literal
+paths or globs. Invalid patterns are logged and skipped (they will never match)
+so a single bad glob never disables the planner.
+
+Both `additionalPaths` lists are ignored when `enablePathScope: false`.
+
+ConfigMap example combining the two scopes:
+
+```yaml
+data:
+  secretName: branch-planner-token
+  resources: |
+    - namespace: flux-system
+      name: open-tofu-global
+      # Global to this Terraform (or, for a wildcard namespace entry without
+      # `name:`, every Terraform in the namespace).
+      additionalPaths:
+        - infra/tenant-infrastructure-configs.yaml
+        - infra/terraform/modules/**
+```
+
+Terraform CR example combining `enablePathScope` with per-object globs:
+
+```yaml
+apiVersion: infra.contrib.fluxcd.io/v1alpha2
+kind: Terraform
+metadata:
+  name: open-tofu-tenant-a
+  namespace: flux-system
+spec:
+  path: ./infra/terraform/environments/tenant-a
+  branchPlanner:
+    enablePathScope: true
+    additionalPaths:
+      - infra/tenant-a/**
+```
+
 ### Targeting a different Kubernetes cluster
 
 Supply the env entry `KUBECONFIG` to use a different kubeconfig; it

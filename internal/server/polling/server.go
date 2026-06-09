@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/fluxcd/pkg/apis/meta"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -89,24 +90,27 @@ func (s *Server) Start(ctx context.Context) error {
 				}
 
 				if resource.Name != "" {
-					if err := s.poll(ctx, resource, secret); err != nil {
+					key := types.NamespacedName{Namespace: resource.Namespace, Name: resource.Name}
+					if err := s.poll(ctx, key, resource.AdditionalPaths, secret); err != nil {
 						s.log.Error(err, "failed to check pull request")
 					}
 
 					continue
 				}
 
-				s.log.Info("checking all Terraform objects in namespace", "namespace", resource.Namespace)
+				s.log.Info("checking all Terraform objects in namespace",
+					"namespace", resource.Namespace,
+					"additionalPaths", resource.AdditionalPaths)
 
-				resources, err := s.listTerraformObjects(ctx, resource.Namespace, nil)
+				tfs, err := s.listTerraformObjects(ctx, resource.Namespace, nil)
 				if err != nil {
 					s.log.Error(err, "failed to list Terraform objects in namespace", "namespace", resource.Namespace)
 
 					continue
 				}
-				s.log.Info("found Terraform objects", "count", len(resources))
+				s.log.Info("found Terraform objects", "count", len(tfs))
 
-				for _, tf := range resources {
+				for _, tf := range tfs {
 					s.log.Info("checking Terraform object", "namespace", tf.Namespace, "name", tf.Name)
 
 					// Skip if the object is the Terraform planner object
@@ -114,12 +118,12 @@ func (s *Server) Start(ctx context.Context) error {
 						continue
 					}
 
-					resource := types.NamespacedName{
+					key := types.NamespacedName{
 						Namespace: tf.Namespace,
 						Name:      tf.Name,
 					}
 
-					if err := s.poll(ctx, resource, secret); err != nil {
+					if err := s.poll(ctx, key, resource.AdditionalPaths, secret); err != nil {
 						s.log.Error(err, "failed to check pull request")
 					}
 				}
@@ -128,7 +132,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-func (s *Server) poll(ctx context.Context, resource types.NamespacedName, secret *corev1.Secret) error {
+func (s *Server) poll(ctx context.Context, resource types.NamespacedName, additionalPaths []string, secret *corev1.Secret) error {
 	s.log.Info("start polling", "namespace", resource.Namespace, "name", resource.Name)
 
 	if secret == nil {
@@ -174,17 +178,47 @@ func (s *Server) poll(ctx context.Context, resource types.NamespacedName, secret
 	}
 
 	s.log.Info("reconciling pull requests")
-	return s.reconcile(ctx, tf, source, prs, gitProvider)
+	return s.reconcile(ctx, tf, additionalPaths, source, prs, gitProvider)
 }
 
-func (s *Server) filterPullRequestsByPath(ctx context.Context, tf *infrav1.Terraform, gitProvider provider.Provider, prs []provider.PullRequest) []provider.PullRequest {
+// filterPullRequestsByPath returns the subset of `prs` whose changed files
+// touch a path the Terraform CR cares about. When EnablePathScope is true the
+// match is the OR of three sources: the spec.path prefix, the per-resource
+// ConfigMap-level `additionalPaths` (passed in here), and the CR-level
+// `spec.branchPlanner.additionalPaths`. ConfigMap and CR globs use doublestar
+// (`**`, `*`, `?`); the spec.path comparison is a literal prefix match for
+// backward compatibility. Invalid globs are logged and skipped, not fatal.
+func (s *Server) filterPullRequestsByPath(ctx context.Context, tf *infrav1.Terraform, additionalPaths []string, gitProvider provider.Provider, prs []provider.PullRequest) []provider.PullRequest {
 	if tf.Spec.BranchPlanner == nil || !tf.Spec.BranchPlanner.EnablePathScope {
 		return prs
 	}
 
 	prefix := strings.TrimLeft(tf.Spec.Path, "./")
-	if prefix == "" {
+
+	globs := make([]string, 0, len(additionalPaths)+len(tf.Spec.BranchPlanner.AdditionalPaths))
+	globs = append(globs, additionalPaths...)
+	globs = append(globs, tf.Spec.BranchPlanner.AdditionalPaths...)
+
+	if prefix == "" && len(globs) == 0 {
 		return prs
+	}
+
+	matches := func(p string) bool {
+		if prefix != "" && strings.HasPrefix(p, prefix) {
+			return true
+		}
+		for _, g := range globs {
+			ok, err := doublestar.PathMatch(g, p)
+			if err != nil {
+				s.log.Error(err, "invalid additionalPaths glob",
+					"glob", g, "name", tf.Name, "namespace", tf.Namespace)
+				continue
+			}
+			if ok {
+				return true
+			}
+		}
+		return false
 	}
 
 	filteredPRs := []provider.PullRequest{}
@@ -196,8 +230,8 @@ func (s *Server) filterPullRequestsByPath(ctx context.Context, tf *infrav1.Terra
 		}
 
 		for _, change := range changes {
-			if strings.HasPrefix(change.Path, prefix) {
-				s.log.Info("has terraform changed", "path", change.Path)
+			if matches(change.Path) {
+				s.log.Info("PR touches watched path", "path", change.Path, "PR ID", pr.Number)
 
 				filteredPRs = append(filteredPRs, pr)
 
@@ -209,10 +243,10 @@ func (s *Server) filterPullRequestsByPath(ctx context.Context, tf *infrav1.Terra
 	return filteredPRs
 }
 
-func (s *Server) reconcile(ctx context.Context, original *infrav1.Terraform, source *sourcev1.GitRepository, prs []provider.PullRequest, gitProvider provider.Provider) error {
+func (s *Server) reconcile(ctx context.Context, original *infrav1.Terraform, additionalPaths []string, source *sourcev1.GitRepository, prs []provider.PullRequest, gitProvider provider.Provider) error {
 	log := s.log.WithValues("terraform", original.Name, "namespace", original.Namespace, "source", source.Name)
 
-	prs = s.filterPullRequestsByPath(ctx, original, gitProvider, prs)
+	prs = s.filterPullRequestsByPath(ctx, original, additionalPaths, gitProvider, prs)
 
 	log.Info("starting reconciliation ...")
 

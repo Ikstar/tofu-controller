@@ -52,6 +52,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `enablePathScope` _boolean_ | EnablePathScope specifies if the Branch Planner should or shouldn't check<br />if a Pull Request has changes under `.spec.path`. If enabled extra<br />resources will be created only if there are any changes in terraform files. |  | Optional: \{\} <br /> |
+| `additionalPaths` _string array_ | AdditionalPaths is an optional list of doublestar glob patterns (e.g.<br />"infra/terraform/modules/**") that the Branch Planner ORs with<br />`.spec.path` when filtering pull requests under EnablePathScope. A PR is<br />included when any changed file matches the spec.path prefix OR any of<br />these globs. Patterns are matched against file paths as returned by the<br />git provider, without a leading "./". Ignored when EnablePathScope is<br />false. |  | Optional: \{\} <br /> |
 
 
 ### CloudSpec

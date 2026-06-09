@@ -305,6 +305,16 @@ type BranchPlanner struct {
 	// resources will be created only if there are any changes in terraform files.
 	// +optional
 	EnablePathScope bool `json:"enablePathScope"`
+
+	// AdditionalPaths is an optional list of doublestar glob patterns (e.g.
+	// "infra/terraform/modules/**") that the Branch Planner ORs with
+	// `.spec.path` when filtering pull requests under EnablePathScope. A PR is
+	// included when any changed file matches the spec.path prefix OR any of
+	// these globs. Patterns are matched against file paths as returned by the
+	// git provider, without a leading "./". Ignored when EnablePathScope is
+	// false.
+	// +optional
+	AdditionalPaths []string `json:"additionalPaths,omitempty"`
 }
 
 type Remediation struct {
